@@ -1,0 +1,141 @@
+---
+title: "STA 304 Final Project"
+output: pdf_document
+author: Mengyu Lei
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+## Loading Data and Required Library
+The data used is collected by the US National Center for Health Statistics (NCHS).
+```{r cars,echo = TRUE,message = FALSE,warning = FALSE}
+rm(list = ls())
+library(NHANES)
+library(tidyverse)
+library(sampling)
+library(ggplot2)
+library(gridExtra)
+library(arsenal)
+data("NHANESraw")
+```
+
+
+## Data Cleaning 
+```{r clean}
+### Only focus on the following variables
+NHANES                    <- NHANESraw %>% filter(SurveyYr=="2011_12" & Age > 17)
+NHANES                    <- na.omit(NHANES[,c(1,3,4,8:11,13,24,25,61,77)])
+```
+
+## Demographic table for the data
+```{r demographic}
+demographic               <- as.data.frame(summary(tableby(Smoke100 ~ ., data = NHANES[,-1])))
+write.table(demographic,file = "Results/Full.Demo.csv",row.names = FALSE)
+```
+
+## Check the association between Smoke100 and BPSysAve
+```{r}
+P1                      <- ggplot(NHANES, aes(x = BPSysAve)) + 
+                           geom_histogram(aes(y = stat(density)),binwidth = 5,fill = "#56B4E9") + 
+                           geom_density(col = "red",size = 1) + 
+                           theme(axis.title = element_text(size = 15), 
+                                 axis.text = element_text(size = 12), 
+                                 plot.title = element_text(size = 15, 
+                                                           hjust = 0.5)) +
+                           labs(title = "BPSysAve", y = "Density")
+
+Count                   <- NHANES %>% group_by(Smoke100) %>% summarize(Count = n())
+P2                      <- ggplot(Count, aes(x = Smoke100,y = Count)) + 
+                           geom_bar(stat = "Identity",fill = "#D55E00") + 
+                           theme(axis.title = element_text(size = 15), 
+                                 axis.text = element_text(size = 12), 
+                                 plot.title = element_text(size = 15, hjust = 0.5)) +
+                           labs(title = "Smoke100")
+
+P3                     <- ggplot(NHANES,aes(x = Smoke100, y = BPSysAve,
+                                                  fill = Smoke100)) + geom_boxplot() +
+                          theme(axis.title = element_text(size = 15), 
+                                axis.text = element_text(size = 12), 
+                                plot.title = element_text(size = 15, hjust = 0.5)) +
+                          labs(title = "BPSysAve by Smoke100", y = "BPSysAve")
+
+grid.arrange(P1,P2,P3,nrow = 1)
+summary(NHANES$BPSysAve)
+table(NHANES$Smoke100)
+NHANES %>% group_by(Smoke100) %>% summarize(Mean = mean(BPSysAve),Median = median(BPSysAve))
+
+### Statistics Testing
+var.test(BPSysAve ~ Smoke100, data = NHANES, alternative = "two.sided")
+t.test(BPSysAve ~ Smoke100, data = NHANES,var.equal = TRUE)
+summary(lm(BPSysAve ~ Smoke100, data = NHANES))
+```
+
+## Predicting BPSysAve by fitting a regression model with the exposure of Smoke100
+```{r model}
+Lower.Model             <- lm(BPSysAve ~ Smoke100, data = NHANES)
+Full.Model              <- lm(formula = as.formula(paste("BPSysAve ~",
+                                                         paste(colnames(NHANES)[-c(1,9,12)],
+                                                               collapse = "+"))),
+                              data = NHANES)
+
+Final.Model             <- step(Full.Model,scope = list(upper=Full.Model,lower=Lower.Model),
+                                direction = "both")
+summary(Final.Model)
+```
+## Model diagnostics
+```{r diagnostic}
+par(mfrow = c(2,2))
+plot(Final.Model)
+```
+
+## Stratified random sampling and the stratified demographic table 
+```{r strata}
+ME                      <- 4
+alpha                   <- 0.01
+D                       <- (ME/qnorm(1 - alpha/2))^2
+
+strata.data             <- NHANES %>% group_by(SDMVSTRA) %>% 
+                           summarise(N = n(),SD = (max(BPSysAve) - min(BPSysAve))/4) %>% 
+                           mutate(Cost = c(52,50,46,53,48,48,47,57,53,47,54,40,43,44))
+
+n                       <- with(strata.data,sum(N*SD/sqrt(Cost))*sum(N*SD*sqrt(Cost))/sum(N^2*D + sum(N*SD^2)))
+strata.data             <- strata.data %>% mutate(n_j = ceiling(n*(N*SD/sqrt(Cost))/(sum(N*SD/sqrt(Cost)))))
+
+demographic             <- as.data.frame(summary(tableby(SDMVSTRA ~ ., data = NHANES[,-1])))
+write.csv(demographic,file = "Results/Strata.Demo.csv",row.names = FALSE)
+```
+
+## Rerun the model with stratified sample
+```{r strata model}
+set.seed(1024)
+strata.index            <- sampling::strata(NHANES,stratanames = "SDMVSTRA",
+                                            size = strata.data$n_j,
+                                            method = "srswor")
+strata.nhanes           <- getdata(NHANES,strata.index)
+strata.model            <- lm(BPSysAve ~ Gender + Age + Education + MaritalStatus + 
+                                BPDiaAve + Smoke100  + HHIncomeMid, data = strata.nhanes)
+summary(strata.model)
+```
+
+## Fit a new model for the stratified data
+```{r fit}
+Lower.strata            <- lm(BPSysAve ~ Smoke100, data = strata.nhanes)
+Full.strata             <- lm(formula = as.formula(paste("BPSysAve ~",
+                                                         paste(colnames(NHANES)[-c(1,9,12)],
+                                                               collapse = "+"))),
+                              data = strata.nhanes)
+
+strata.new              <- step(Full.strata,scope = list(upper = Full.strata,
+                                                         lower = Lower.strata),
+                                direction = "both")
+summary(strata.new)
+```
+
+## Reduced Model Comparison 
+```{r reduced}
+summary(lm(BPSysAve ~ Smoke100 + Age + BPDiaAve + as.factor(SDMVSTRA) , data = NHANES))
+summary(lm(BPSysAve ~ Smoke100 + Age + BPDiaAve , data = strata.nhanes))
+```
